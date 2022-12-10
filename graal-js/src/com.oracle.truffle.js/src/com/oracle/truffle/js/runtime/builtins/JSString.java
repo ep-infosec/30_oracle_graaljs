@@ -1,0 +1,368 @@
+/*
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * The Universal Permissive License (UPL), Version 1.0
+ *
+ * Subject to the condition set forth below, permission is hereby granted to any
+ * person obtaining a copy of this software, associated documentation and/or
+ * data (collectively the "Software"), free of charge and under any and all
+ * copyright rights in the Software, and any and all patent rights owned or
+ * freely licensable by each licensor hereunder covering either (i) the
+ * unmodified Software as contributed to or provided by such licensor, or (ii)
+ * the Larger Works (as defined below), to deal in both
+ *
+ * (a) the Software, and
+ *
+ * (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
+ * one is included with the Software each a "Larger Work" to which the Software
+ * is contributed by such licensors),
+ *
+ * without restriction, including without limitation the rights to copy, create
+ * derivative works of, display, perform, and distribute the Software and make,
+ * use, sell, offer for sale, import, export, have made, and have sold the
+ * Software and the Larger Work(s), and to sublicense the foregoing rights on
+ * either these or other terms.
+ *
+ * This license is subject to the following condition:
+ *
+ * The above copyright notice and either this complete permission notice or at a
+ * minimum a reference to the UPL must be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+package com.oracle.truffle.js.runtime.builtins;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.object.HiddenKey;
+import com.oracle.truffle.api.object.Shape;
+import com.oracle.truffle.api.strings.TruffleString;
+import com.oracle.truffle.js.builtins.StringFunctionBuiltins;
+import com.oracle.truffle.js.builtins.StringPrototypeBuiltins;
+import com.oracle.truffle.js.lang.JavaScriptLanguage;
+import com.oracle.truffle.js.runtime.Errors;
+import com.oracle.truffle.js.runtime.JSConfig;
+import com.oracle.truffle.js.runtime.JSContext;
+import com.oracle.truffle.js.runtime.JSRealm;
+import com.oracle.truffle.js.runtime.JSRuntime;
+import com.oracle.truffle.js.runtime.Strings;
+import com.oracle.truffle.js.runtime.Symbol;
+import com.oracle.truffle.js.runtime.ToDisplayStringFormat;
+import com.oracle.truffle.js.runtime.array.ScriptArray;
+import com.oracle.truffle.js.runtime.objects.JSAttributes;
+import com.oracle.truffle.js.runtime.objects.JSDynamicObject;
+import com.oracle.truffle.js.runtime.objects.JSObject;
+import com.oracle.truffle.js.runtime.objects.JSObjectUtil;
+import com.oracle.truffle.js.runtime.objects.JSProperty;
+import com.oracle.truffle.js.runtime.objects.JSShape;
+import com.oracle.truffle.js.runtime.objects.PropertyDescriptor;
+import com.oracle.truffle.js.runtime.objects.PropertyProxy;
+import com.oracle.truffle.js.runtime.util.DefinePropertyUtil;
+import com.oracle.truffle.js.runtime.util.IteratorUtil;
+
+public final class JSString extends JSPrimitive implements JSConstructorFactory.Default.WithFunctions {
+
+    public static final JSString INSTANCE = new JSString();
+
+    public static final TruffleString TYPE_NAME = Strings.STRING;
+    public static final TruffleString CLASS_NAME = Strings.UC_STRING;
+    public static final TruffleString PROTOTYPE_NAME = Strings.constant("String.prototype");
+    public static final TruffleString CLASS_NAME_EXTENSIONS = Strings.constant("StringExtensions");
+
+    public static final TruffleString LENGTH = Strings.constant("length");
+
+    public static final TruffleString ITERATOR_CLASS_NAME = Strings.constant("String Iterator");
+    public static final TruffleString ITERATOR_PROTOTYPE_NAME = Strings.constant("String Iterator.prototype");
+    public static final HiddenKey ITERATED_STRING_ID = new HiddenKey("IteratedString");
+    public static final HiddenKey STRING_ITERATOR_NEXT_INDEX_ID = new HiddenKey("StringIteratorNextIndex");
+
+    public static final TruffleString REGEXP_ITERATOR_CLASS_NAME = Strings.constant("RegExp String Iterator");
+    public static final TruffleString REGEXP_ITERATOR_PROTOTYPE_NAME = Strings.constant("RegExp String Iterator.prototype");
+    public static final HiddenKey REGEXP_ITERATOR_ITERATING_REGEXP_ID = new HiddenKey("IteratingRegExp");
+    public static final HiddenKey REGEXP_ITERATOR_ITERATED_STRING_ID = new HiddenKey("IteratedString");
+    public static final HiddenKey REGEXP_ITERATOR_GLOBAL_ID = new HiddenKey("Global");
+    public static final HiddenKey REGEXP_ITERATOR_UNICODE_ID = new HiddenKey("Unicode");
+    public static final HiddenKey REGEXP_ITERATOR_DONE_ID = new HiddenKey("Done");
+
+    private static final PropertyProxy LENGTH_PROXY = new StringLengthProxyProperty();
+
+    public static final TruffleString TRIM_START = Strings.constant("trimStart");
+    public static final TruffleString TRIM_END = Strings.constant("trimEnd");
+    public static final TruffleString TRIM_LEFT = Strings.constant("trimLeft");
+    public static final TruffleString TRIM_RIGHT = Strings.constant("trimRight");
+
+    private JSString() {
+    }
+
+    public static JSStringObject create(JSContext context, JSRealm realm, TruffleString value) {
+        JSStringObject stringObj = JSStringObject.create(realm, context.getStringFactory(), value);
+        return context.trackAllocation(stringObj);
+    }
+
+    @TruffleBoundary
+    @Override
+    public boolean hasOwnProperty(JSDynamicObject thisObj, Object key) {
+        if (super.hasOwnProperty(thisObj, key)) {
+            return true;
+        }
+        long index = JSRuntime.propertyKeyToArrayIndex(key);
+        return index >= 0 && index < getStringLength(thisObj);
+    }
+
+    public static TruffleString getString(JSDynamicObject obj) {
+        assert isJSString(obj);
+        return ((com.oracle.truffle.js.runtime.builtins.JSStringObject) obj).getString();
+    }
+
+    @TruffleBoundary
+    public static int getStringLength(JSDynamicObject obj) {
+        assert isJSString(obj);
+        return Strings.length(getString(obj));
+    }
+
+    @Override
+    public boolean hasOwnProperty(JSDynamicObject thisObj, long index) {
+        if (index >= 0 && index < getStringLength(thisObj)) {
+            return true;
+        }
+        return super.hasOwnProperty(thisObj, Strings.fromLong(index));
+    }
+
+    @TruffleBoundary
+    @Override
+    public Object getOwnHelper(JSDynamicObject store, Object thisObj, Object key, Node encapsulatingNode) {
+        long value = JSRuntime.propertyKeyToArrayIndex(key);
+        if (0 <= value && value < getStringLength(store)) {
+            return Strings.substring(JavaScriptLanguage.get(encapsulatingNode).getJSContext(), getString(store), (int) value, 1);
+        }
+        return super.getOwnHelper(store, thisObj, key, encapsulatingNode);
+    }
+
+    @TruffleBoundary
+    @Override
+    public Object getOwnHelper(JSDynamicObject store, Object thisObj, long index, Node encapsulatingNode) {
+        if (0 <= index && index < getStringLength(store)) {
+            return Strings.substring(JavaScriptLanguage.get(encapsulatingNode).getJSContext(), getString(store), (int) index, 1);
+        }
+        return super.getOwnHelper(store, thisObj, Strings.fromLong(index), encapsulatingNode);
+    }
+
+    @TruffleBoundary
+    @Override
+    public boolean set(JSDynamicObject thisObj, Object key, Object value, Object receiver, boolean isStrict, Node encapsulatingNode) {
+        if (receiver != thisObj) {
+            return ordinarySetWithReceiver(thisObj, key, value, receiver, isStrict, encapsulatingNode);
+        }
+        long index = JSRuntime.propertyKeyToArrayIndex(key);
+        if (index >= 0 && index < getStringLength(thisObj)) {
+            // Indexed properties of a String are non-writable and non-configurable.
+            if (isStrict) {
+                throw Errors.createTypeErrorNotWritableIndex(index, thisObj, encapsulatingNode);
+            }
+            return true;
+        } else {
+            return super.set(thisObj, key, value, receiver, isStrict, encapsulatingNode);
+        }
+    }
+
+    @TruffleBoundary
+    @Override
+    public boolean set(JSDynamicObject thisObj, long index, Object value, Object receiver, boolean isStrict, Node encapsulatingNode) {
+        if (receiver != thisObj) {
+            return ordinarySetWithReceiver(thisObj, Strings.fromLong(index), value, receiver, isStrict, encapsulatingNode);
+        }
+        if (index < getStringLength(thisObj)) {
+            // Indexed properties of a String are non-writable and non-configurable.
+            if (isStrict) {
+                throw Errors.createTypeErrorNotWritableIndex(index, thisObj, encapsulatingNode);
+            }
+            return true;
+        } else {
+            return super.set(thisObj, index, value, receiver, isStrict, encapsulatingNode);
+        }
+    }
+
+    @TruffleBoundary
+    @Override
+    public List<Object> getOwnPropertyKeys(JSDynamicObject thisObj, boolean strings, boolean symbols) {
+        int len = getStringLength(thisObj);
+        List<Object> indices = strings ? ScriptArray.makeRangeList(0, len) : Collections.emptyList();
+        List<Object> keyList = thisObj.getShape().getKeyList();
+        if (keyList.isEmpty()) {
+            return indices;
+        } else {
+            List<Object> list = new ArrayList<>(keyList.size());
+            if (strings) {
+                keyList.forEach(k -> {
+                    if (Strings.isTString(k) && JSRuntime.isArrayIndexString((TruffleString) k)) {
+                        assert JSRuntime.propertyKeyToArrayIndex(k) >= len;
+                        list.add(k);
+                    }
+                });
+                Collections.sort(list, JSRuntime::comparePropertyKeys);
+                keyList.forEach(k -> {
+                    if (Strings.isTString(k) && !JSRuntime.isArrayIndexString((TruffleString) k)) {
+                        list.add(k);
+                    }
+                });
+            }
+            if (symbols) {
+                keyList.forEach(k -> {
+                    if (k instanceof Symbol) {
+                        list.add(k);
+                    }
+                });
+            }
+            return IteratorUtil.concatLists(indices, list);
+        }
+    }
+
+    @Override
+    public boolean delete(JSDynamicObject thisObj, Object key, boolean isStrict) {
+        long idx = JSRuntime.propertyKeyToArrayIndex(key);
+        if (JSRuntime.isArrayIndex(idx) && ((0 <= idx) && (idx < getStringLength(thisObj)))) {
+            if (isStrict) {
+                throw Errors.createTypeError("cannot delete index");
+            } else {
+                return false;
+            }
+        }
+        return deletePropertyDefault(thisObj, key, isStrict);
+    }
+
+    @Override
+    public JSDynamicObject createPrototype(final JSRealm realm, JSFunctionObject ctor) {
+        JSContext ctx = realm.getContext();
+        Shape protoShape = JSShape.createPrototypeShape(ctx, INSTANCE, realm.getObjectPrototype());
+        JSObject prototype = JSStringObject.create(protoShape, Strings.EMPTY_STRING);
+        JSObjectUtil.setOrVerifyPrototype(ctx, prototype, realm.getObjectPrototype());
+
+        JSObjectUtil.putConstructorProperty(ctx, prototype, ctor);
+        // sets the length just for the prototype
+        JSObjectUtil.putDataProperty(ctx, prototype, LENGTH, 0, JSAttributes.notConfigurableNotEnumerableNotWritable());
+        JSObjectUtil.putFunctionsFromContainer(realm, prototype, StringPrototypeBuiltins.BUILTINS);
+        if (ctx.isOptionNashornCompatibilityMode() || ctx.getParserOptions().getEcmaScriptVersion() >= JSConfig.ECMAScript2019) {
+            JSObjectUtil.putFunctionsFromContainer(realm, prototype, StringPrototypeBuiltins.EXTENSION_BUILTINS);
+        }
+        if (ctx.isOptionAnnexB()) {
+            // trimLeft/trimRight are the same objects as trimStart/trimEnd
+            Object trimStart = JSObject.get(prototype, TRIM_START);
+            Object trimEnd = JSObject.get(prototype, TRIM_END);
+            JSObjectUtil.putDataProperty(ctx, prototype, TRIM_LEFT, trimStart, JSAttributes.configurableNotEnumerableWritable());
+            JSObjectUtil.putDataProperty(ctx, prototype, TRIM_RIGHT, trimEnd, JSAttributes.configurableNotEnumerableWritable());
+        }
+        return prototype;
+    }
+
+    @Override
+    public Shape makeInitialShape(JSContext context, JSDynamicObject prototype) {
+        Shape initialShape = JSObjectUtil.getProtoChildShape(prototype, JSString.INSTANCE, context);
+        initialShape = Shape.newBuilder(initialShape).addConstantProperty(LENGTH, LENGTH_PROXY, JSAttributes.notConfigurableNotEnumerableNotWritable() | JSProperty.PROXY).build();
+        return initialShape;
+    }
+
+    public static JSConstructor createConstructor(JSRealm realm) {
+        return INSTANCE.createConstructorAndPrototype(realm, StringFunctionBuiltins.BUILTINS);
+    }
+
+    @Override
+    public TruffleString getClassName() {
+        return CLASS_NAME;
+    }
+
+    @Override
+    public TruffleString getClassName(JSDynamicObject object) {
+        return getClassName();
+    }
+
+    @Override
+    public TruffleString getBuiltinToStringTag(JSDynamicObject object) {
+        return getClassName(object);
+    }
+
+    @TruffleBoundary
+    @Override
+    public TruffleString toDisplayStringImpl(JSDynamicObject obj, boolean allowSideEffects, ToDisplayStringFormat format, int depth) {
+        if (JavaScriptLanguage.get(null).getJSContext().isOptionNashornCompatibilityMode()) {
+            return Strings.concatAll(Strings.BRACKET_OPEN, CLASS_NAME, Strings.SPACE, getString(obj), Strings.BRACKET_CLOSE);
+        } else {
+            return JSRuntime.objectToDisplayString(obj, allowSideEffects, format, depth,
+                            getBuiltinToStringTag(obj), new TruffleString[]{Strings.PRIMITIVE_VALUE}, new Object[]{JSString.getString(obj)});
+        }
+    }
+
+    public static boolean isJSString(Object obj) {
+        return obj instanceof JSStringObject;
+    }
+
+    public static final class StringLengthProxyProperty extends PropertyProxy {
+        @Override
+        public Object get(JSDynamicObject store) {
+            return getStringLength(store);
+        }
+    }
+
+    @Override
+    public PropertyDescriptor getOwnProperty(JSDynamicObject thisObj, Object key) {
+        assert JSRuntime.isPropertyKey(key);
+        PropertyDescriptor desc = ordinaryGetOwnProperty(thisObj, key);
+        if (desc == null) {
+            return stringGetIndexProperty(thisObj, key);
+        } else {
+            return desc;
+        }
+    }
+
+    @Override
+    public boolean usesOrdinaryGetOwnProperty() {
+        return false;
+    }
+
+    @TruffleBoundary
+    @Override
+    public boolean defineOwnProperty(JSDynamicObject thisObj, Object key, PropertyDescriptor desc, boolean doThrow) {
+        assert JSRuntime.isPropertyKey(key) : key.getClass().getName();
+        long idx = JSRuntime.propertyKeyToArrayIndex(key);
+        if (idx >= 0 && idx < getStringLength(thisObj)) {
+            return DefinePropertyUtil.isCompatiblePropertyDescriptor(isExtensible(thisObj), desc, stringGetIndexProperty(thisObj, key), doThrow);
+        }
+        return super.defineOwnProperty(thisObj, key, desc, doThrow);
+    }
+
+    /**
+     * ES6, 9.4.3.1.1 StringGetIndexProperty (S, P).
+     */
+    @TruffleBoundary
+    public static PropertyDescriptor stringGetIndexProperty(JSDynamicObject thisObj, Object key) {
+        assert JSString.isJSString(thisObj);
+        long index = JSRuntime.propertyKeyToArrayIndex(key);
+        if (index < 0) {
+            return null;
+        }
+        TruffleString s = getString(thisObj);
+        int len = Strings.length(s);
+        if (len <= index) {
+            return null;
+        }
+        TruffleString resultStr = Strings.substring(JavaScriptLanguage.get(null).getJSContext(), s, (int) index, 1);
+        return PropertyDescriptor.createData(resultStr, true, false, false);
+    }
+
+    @Override
+    public JSDynamicObject getIntrinsicDefaultProto(JSRealm realm) {
+        return realm.getStringPrototype();
+    }
+
+}
